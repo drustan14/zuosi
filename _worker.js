@@ -1,218 +1,136 @@
-/**
+export default {
+  async fetch(request, env) {
+    const targetURL = env.URL;       // 目标站点地址（如 https://example.com）
+    const password = env.PASSWORD;   // 环境变量中的密码
 
-CF Worker: 简单反代 env.URL，密码为 env.PASSWORD
+    const { pathname, search } = new URL(request.url);
+    const cookies = request.headers.get("Cookie") || "";
+    const isAuth = cookies.includes("auth=1");
 
-带美化主页 UI */
-
-
-export default { async fetch(request, env) { const TARGET = env.URL; const PASSWORD = env.PASSWORD; if (!TARGET) return new Response('Missing env.URL', { status: 500 });
-
-const reqUrl = new URL(request.url);
-
-// 美化后的主页 UI
-if (reqUrl.pathname === '/' || reqUrl.pathname === '/index.html') {
-  const html = `
-
-<!doctype html>
-
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>CFWorker 反代面板</title>
-  <style>
-    :root{--bg1:#0f172a;--bg2:#0b1220;--card:#0b1226;--accent:#7c3aed;--glass:rgba(255,255,255,0.06);--muted:rgba(255,255,255,0.6)}
-    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Helvetica Neue",Arial}
-    body{
-      background: radial-gradient(1200px 600px at 10% 10%, rgba(124,58,237,0.12), transparent 10%),
-                  radial-gradient(900px 500px at 90% 90%, rgba(14,165,233,0.08), transparent 10%),
-                  linear-gradient(180deg,var(--bg1),var(--bg2));
-      color:#e6eef8;display:flex;align-items:center;justify-content:center;padding:24px;
+    // 如果未登录，则返回登录页或处理登录表单
+    if (!isAuth) {
+      if (request.method === "POST") {
+        // 处理登录表单提交
+        const formData = await request.formData();
+        const input = formData.get("password");
+        if (input === password) {
+          // 登录成功：设置 Cookie 并重定向到原路径
+          const response = new Response(null, { status: 302 });
+          response.headers.set("Set-Cookie", "auth=1; Path=/; HttpOnly");
+          response.headers.set("Location", request.url);
+          return response;
+        } else {
+          // 密码错误：显示登录页面并提示错误
+          const html = loginPageHtml("密码错误，请重试。");
+          return new Response(html, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
+        }
+      }
+      // 返回登录页面（GET 请求）
+      return new Response(loginPageHtml(), { headers: { "Content-Type": "text/html;charset=UTF-8" } });
     }
-    .wrap{width:100%;max-width:980px;display:grid;grid-template-columns:1fr 420px;gap:28px}
-    .hero{padding:32px;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));box-shadow:0 8px 30px rgba(2,6,23,0.6);backdrop-filter: blur(6px)}
-    .logo{display:flex;align-items:center;gap:14px}
-    .logo svg{width:48px;height:48px}
-    h1{margin:0;font-size:22px}
-    p.lead{margin-top:8px;color:var(--muted);max-width:56ch}.card{background:var(--card);padding:20px;border-radius:12px;box-shadow:0 6px 24px rgba(2,6,23,0.5);border:1px solid rgba(255,255,255,0.03)}
-label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
-input[type="text"],input[type="password"],select{width:100%;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.04);background:var(--glass);color:inherit;font-size:14px;outline:none}
-.row{display:flex;gap:12px}
-.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;border:none;cursor:pointer;background:linear-gradient(90deg,var(--accent),#06b6d4);color:#fff;font-weight:600}
-.muted{color:var(--muted);font-size:13px}
-.meta{margin-top:12px;font-size:13px;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
 
-.foot{grid-column:1/-1;margin-top:18px;text-align:center;color:var(--muted);font-size:13px}
+    // 已登录，继续反向代理
+    // 构建目标站点 URL
+    const target = new URL(targetURL);
+    const fetchURL = new URL(targetURL);
+    // 支持 env.URL 包含路径前缀的情况
+    fetchURL.pathname = target.pathname.replace(/\/$/, "") + pathname;
+    fetchURL.search = search;
 
-@media (max-width:880px){.wrap{grid-template-columns:1fr;}.hero{order:2}.card{order:1}}
+    // 转发请求到目标站点
+    const init = {
+      method: request.method,
+      headers: request.headers,
+      body: request.method === "GET" || request.method === "HEAD" ? null : request.body
+    };
+    let res = await fetch(fetchURL.toString(), init);
 
+    // 如果是 HTML 内容，则使用 HTMLRewriter 修改其中的链接
+    const contentType = res.headers.get("Content-Type") || "";
+    if (contentType.startsWith("text/html")) {
+      const targetOrigin = new URL(targetURL).origin;
+      const workerOrigin = new URL(request.url).origin;
+      // 定义用于重写链接的类
+      class UrlRewriter {
+        constructor(attrName) {
+          this.attrName = attrName;
+        }
+        element(element) {
+          const attr = element.getAttribute(this.attrName);
+          if (!attr) return;
+          try {
+            const url = new URL(attr);
+            // 如果链接是绝对的目标域名，替换为 Worker 路径
+            if (url.origin === targetOrigin) {
+              element.setAttribute(this.attrName, workerOrigin + url.pathname + url.search + url.hash);
+            }
+          } catch (e) {
+            // 如果链接是以 '/' 开头的相对路径，也指向目标站点根路径，替换为 Worker 域名
+            if (attr.startsWith("/")) {
+              element.setAttribute(this.attrName, workerOrigin + attr);
+            }
+            // 其他相对路径暂不处理
+          }
+        }
+      }
+      // 实例化 HTMLRewriter，并指定要处理的标签及其属性
+      const rewriter = new HTMLRewriter()
+        .on("a", new UrlRewriter("href"))
+        .on("img", new UrlRewriter("src"))
+        .on("script", new UrlRewriter("src"))
+        .on("link", new UrlRewriter("href"))
+        .on("iframe", new UrlRewriter("src"))
+        .on("form", new UrlRewriter("action"));
+      return rewriter.transform(res);
+    }
+
+    // 非 HTML 内容直接返回
+    return res;
+  }
+};
+
+// 登录页面的 HTML 及样式
+function loginPageHtml(errorMsg = "") {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>登录验证</title>
+  <style>
+    body {
+      display: flex; align-items: center; justify-content: center;
+      height: 100vh; margin: 0; font-family: Arial, sans-serif;
+      background-color: #f0f2f5;
+    }
+    .card {
+      background: #fff; padding: 2em; border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 320px;
+      text-align: center;
+    }
+    .card h2 { margin-bottom: 1em; color: #333; }
+    .card input[type="password"] {
+      width: 100%; padding: 0.5em; margin-bottom: 1em;
+      border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;
+    }
+    .card button {
+      width: 100%; padding: 0.75em; background: #0070f3;
+      color: #fff; border: none; border-radius: 4px;
+      font-size: 1em; cursor: pointer;
+    }
+    .card button:hover { background: #0055aa; }
+    .error { color: #d93025; margin-bottom: 1em; }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="hero card">
-      <div class="logo">
-        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <rect x="3" y="3" width="18" height="18" rx="4" fill="rgba(255,255,255,0.04)"/>
-          <path d="M7 12h10M7 8h10M7 16h6" stroke="white" stroke-opacity="0.9" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <div>
-          <h1>CFWorker 反代面板</h1>
-          <p class="lead">使用此面板输入密码即可通过本 Worker 访问目标站点。响应中的 URL 将被替换为当前代理的地址。</p>
-        </div>
-      </div>
-      <div style="margin-top:18px">
-        <div style="display:grid;grid-template-columns:1fr 160px;gap:12px">
-          <div>
-            <label>目标地址 (env.URL)</label>
-            <input type="text" id="target" value="${TARGET}" readonly />
-          </div>
-          <div>
-            <label>当前代理</label>
-            <input type="text" id="proxy" value="${reqUrl.origin}" readonly />
-          </div>
-        </div>
-        <div style="margin-top:12px">
-          <label>访问路径 (可留空表示根目录)</label>
-          <input type="text" id="path" placeholder="/ 或 /index.html 或 /some/page" />
-        </div>
-      </div>
-    </div><div class="card" style="display:flex;flex-direction:column;gap:12px;align-items:stretch">
-  <div>
-    <label>密码</label>
-    <input type="password" id="pw" placeholder="输入访问密码" />
+  <div class="card">
+    <h2>请输入密码</h2>
+    <p>此页面受密码保护，请输入密码以继续。</p>
+    ${errorMsg ? `<p class="error">${errorMsg}</p>` : ""}
+    <form method="POST">
+      <input type="password" name="password" placeholder="密码" required />
+      <button type="submit">登录</button>
+    </form>
   </div>
-  <div>
-    <label>认证方式</label>
-    <select id="mode">
-      <option value="query">查询参数 (?pw=)</option>
-      <option value="bearer">Authorization: Bearer</option>
-      <option value="header">x-proxy-password Header</option>
-    </select>
-  </div>
-
-  <div style="display:flex;gap:8px">
-    <button class="btn" id="open">访问</button>
-    <button class="btn" id="curl" style="background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit">复制 curl</button>
-  </div>
-
-  <div class="meta">
-    <div class="muted">注：如果服务器返回重定向，Location 会被改写为代理地址。</div>
-    <div class="muted">安全提示：不要在不受信任的环境粘贴密码。</div>
-  </div>
-</div>
-
-<div class="foot">快速提示：你也可以使用 <code>Authorization: Bearer &lt;PASSWORD&gt;</code> 或者 <code>x-proxy-password</code> 请求头进行认证。</div>
-
-  </div>  <script>
-    (function(){
-      const el = id => document.getElementById(id);
-      function normPath(p){ if(!p) return '/'; return p.startsWith('/')? p : '/' + p }
-      function buildUrl(){
-        const mode = el('mode').value;
-        const pw = el('pw').value;
-        const path = normPath(el('path').value || '/');
-        const base = location.origin + path;
-        if(mode === 'query') return base + '?pw=' + encodeURIComponent(pw);
-        return base;
-      }
-
-      el('open').addEventListener('click', ()=>{
-        const mode = el('mode').value;
-        const pw = el('pw').value;
-        if(!pw) return alert('请输入密码');
-        if(mode === 'query'){
-          window.location.href = buildUrl();
-        } else if(mode === 'bearer'){
-          fetch(location.origin + normPath(el('path').value || '/'), {headers:{'Authorization':'Bearer ' + pw}})
-            .then(r=>{
-              if(r.status===401) throw new Error('Unauthorized');
-              return r.text();
-            })
-            .then(t=>{
-              const win = window.open('about:blank');
-              win.document.open(); win.document.write(t); win.document.close();
-            }).catch(e=>alert(e.message || e));
-        } else {
-          fetch(location.origin + normPath(el('path').value || '/'), {headers:{'x-proxy-password': pw}})
-            .then(r=>{
-              if(r.status===401) throw new Error('Unauthorized');
-              return r.text();
-            })
-            .then(t=>{
-              const win = window.open('about:blank');
-              win.document.open(); win.document.write(t); win.document.close();
-            }).catch(e=>alert(e.message || e));
-        }
-      });
-
-      el('curl').addEventListener('click', ()=>{
-        const mode = el('mode').value;
-        const pw = el('pw').value;
-        const path = normPath(el('path').value || '/');
-        if(!pw) return alert('请输入密码以生成 curl');
-        let cmd = '';
-        if(mode === 'query'){
-          cmd = 'curl -L "' + location.origin + path + '?pw=' + encodeURIComponent(pw) + '"';
-        } else if(mode === 'bearer'){
-          cmd = 'curl -L -H "Authorization: Bearer ' + pw + '" "' + location.origin + path + '"';
-        } else {
-          cmd = 'curl -L -H "x-proxy-password: ' + pw + '" "' + location.origin + path + '"';
-        }
-        navigator.clipboard.writeText(cmd).then(()=>alert('已复制 curl 到剪贴板'));
-      });
-    })();
-  </script></body>
-</html>
-      `;
-      return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    }// 验证密码
-const authHeader = request.headers.get('authorization') || '';
-const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-const provided = reqUrl.searchParams.get('pw') || request.headers.get('x-proxy-password') || bearer;
-if (provided !== PASSWORD) {
-  return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="CF-Proxy"' } });
+</body>
+</html>`;
 }
-
-// 构造上游 URL
-const upstream = new URL(reqUrl.pathname + reqUrl.search, TARGET);
-const headers = new Headers(request.headers);
-headers.delete('host');
-
-const upstreamReq = new Request(upstream.toString(), {
-  method: request.method,
-  headers,
-  body: request.body,
-  redirect: 'manual',
-});
-
-const resp = await fetch(upstreamReq);
-
-const newHeaders = new Headers(resp.headers);
-const targetOrigin = (new URL(TARGET)).origin;
-const proxyOrigin = reqUrl.protocol + '//' + reqUrl.host;
-
-if (newHeaders.has('location')) {
-  const loc = newHeaders.get('location');
-  if (loc && loc.startsWith(targetOrigin)) {
-    newHeaders.set('location', loc.replace(targetOrigin, proxyOrigin));
-  }
-}
-
-const contentType = (newHeaders.get('content-type') || '').toLowerCase();
-if (contentType.includes('text/html')) {
-  let text = await resp.text();
-  const escapeRegExp = s => s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
-  const reOrigin = new RegExp(escapeRegExp(targetOrigin), 'g');
-  text = text.replace(reOrigin, proxyOrigin);
-  const targetHost = (new URL(TARGET)).host;
-  const reProtoRel = new RegExp('//' + escapeRegExp(targetHost), 'g');
-  text = text.replace(reProtoRel, '//' + reqUrl.host);
-  newHeaders.delete('content-length');
-  return new Response(text, { status: resp.status, headers: newHeaders });
-}
-
-return new Response(resp.body, { status: resp.status, headers: newHeaders });
-
-} };
-
