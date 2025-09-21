@@ -114,7 +114,7 @@ input[type="text"],input[type="password"],select{width:100%;padding:12px;border-
         const path = normPath(el('path').value || '/');
         const base = location.origin + path;
         if(mode === 'query') return base + '?pw=' + encodeURIComponent(pw);
-        return base; // for header/bearer we'll use curl or instruct to use header
+        return base;
       }
 
       el('open').addEventListener('click', ()=>{
@@ -124,7 +124,6 @@ input[type="text"],input[type="password"],select{width:100%;padding:12px;border-
         if(mode === 'query'){
           window.location.href = buildUrl();
         } else if(mode === 'bearer'){
-          // 使用 fetch 并设置 Authorization header，然后把返回的 HTML 替换打开新窗口
           fetch(location.origin + normPath(el('path').value || '/'), {headers:{'Authorization':'Bearer ' + pw}})
             .then(r=>{
               if(r.status===401) throw new Error('Unauthorized');
@@ -135,7 +134,6 @@ input[type="text"],input[type="password"],select{width:100%;padding:12px;border-
               win.document.open(); win.document.write(t); win.document.close();
             }).catch(e=>alert(e.message || e));
         } else {
-          // header 模式：通过 fetch 加自定义头
           fetch(location.origin + normPath(el('path').value || '/'), {headers:{'x-proxy-password': pw}})
             .then(r=>{
               if(r.status===401) throw new Error('Unauthorized');
@@ -155,11 +153,11 @@ input[type="text"],input[type="password"],select{width:100%;padding:12px;border-
         if(!pw) return alert('请输入密码以生成 curl');
         let cmd = '';
         if(mode === 'query'){
-          cmd = `curl -L "${location.origin}${path}?pw=${encodeURIComponent(pw)}"`;
+          cmd = 'curl -L "' + location.origin + path + '?pw=' + encodeURIComponent(pw) + '"';
         } else if(mode === 'bearer'){
-          cmd = `curl -L -H 'Authorization: Bearer ${pw}' "${location.origin}${path}"`;
+          cmd = 'curl -L -H "Authorization: Bearer ' + pw + '" "' + location.origin + path + '"';
         } else {
-          cmd = `curl -L -H 'x-proxy-password: ${pw}' "${location.origin}${path}"`;
+          cmd = 'curl -L -H "x-proxy-password: ' + pw + '" "' + location.origin + path + '"';
         }
         navigator.clipboard.writeText(cmd).then(()=>alert('已复制 curl 到剪贴板'));
       });
@@ -168,7 +166,7 @@ input[type="text"],input[type="password"],select{width:100%;padding:12px;border-
 </html>
       `;
       return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    }// 验证密码：支持 Authorization: Bearer, x-proxy-password header, 或 ?pw=xxx
+    }// 验证密码
 const authHeader = request.headers.get('authorization') || '';
 const bearer = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 const provided = reqUrl.searchParams.get('pw') || request.headers.get('x-proxy-password') || bearer;
@@ -176,7 +174,7 @@ if (provided !== PASSWORD) {
   return new Response('Unauthorized', { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="CF-Proxy"' } });
 }
 
-// 构造上游 URL：把请求的 path+search 拼到 env.URL 上
+// 构造上游 URL
 const upstream = new URL(reqUrl.pathname + reqUrl.search, TARGET);
 const headers = new Headers(request.headers);
 headers.delete('host');
@@ -190,12 +188,10 @@ const upstreamReq = new Request(upstream.toString(), {
 
 const resp = await fetch(upstreamReq);
 
-// 复制响应头并准备可能的替换
 const newHeaders = new Headers(resp.headers);
-const targetOrigin = (new URL(TARGET)).origin; // e.g. https://example.com
-const proxyOrigin = reqUrl.protocol + '//' + reqUrl.host; // 当前反代 origin
+const targetOrigin = (new URL(TARGET)).origin;
+const proxyOrigin = reqUrl.protocol + '//' + reqUrl.host;
 
-// 如果有重定向 Location，替换为代理 origin
 if (newHeaders.has('location')) {
   const loc = newHeaders.get('location');
   if (loc && loc.startsWith(targetOrigin)) {
@@ -204,26 +200,18 @@ if (newHeaders.has('location')) {
 }
 
 const contentType = (newHeaders.get('content-type') || '').toLowerCase();
-
-// 仅对 HTML 做文本替换
 if (contentType.includes('text/html')) {
   let text = await resp.text();
-
-  // 简单且覆盖大多数情况的替换：
   const escapeRegExp = s => s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
   const reOrigin = new RegExp(escapeRegExp(targetOrigin), 'g');
   text = text.replace(reOrigin, proxyOrigin);
-
-  const targetHost = (new URL(TARGET)).host; // host:port
+  const targetHost = (new URL(TARGET)).host;
   const reProtoRel = new RegExp('//' + escapeRegExp(targetHost), 'g');
   text = text.replace(reProtoRel, '//' + reqUrl.host);
-
   newHeaders.delete('content-length');
-
   return new Response(text, { status: resp.status, headers: newHeaders });
 }
 
-// 非 HTML，直接透传（stream）
 return new Response(resp.body, { status: resp.status, headers: newHeaders });
 
 } };
